@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="it" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Spese</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0A84FF"/>
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <style>
+    :root { --bg:#F2F2F7; --card:#FFFFFF; --muted:#6b7280; color-scheme: light dark; }
+    [data-theme='dark'] { --bg:#000000; --card:#1C1C1E; --muted:#9ca3af; }
+    html,body { margin:0; height:100%; background:var(--bg); font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .bg { background-color: var(--bg); }
+    .input { background: var(--card); border:1px solid #e5e7eb; padding:10px 12px; border-radius:12px; width:100%; box-sizing:border-box; }
+    .btn { background: var(--card); border:1px solid #e5e7eb; padding:8px 12px; border-radius:12px; }
+    .btn.primary { background:#0A84FF; color:white; border-color:#0A84FF; }
+    .btn.danger { background:#FF3B30; color:white; border-color:#FF3B30; }
+    .btn.ghost { background:transparent; border-color:transparent; }
+    .container { max-width: 960px; margin: 0 auto; padding: 16px; color: #111; }
+    @media (prefers-color-scheme: dark) {
+      html[data-theme="dark"] body { color: #f7f7f7; }
+    }
+    .tabbar { position: fixed; bottom:0; left:0; right:0; background: rgba(255,255,255,.9); backdrop-filter: blur(6px); border-top:1px solid #e5e7eb; }
+    @media (prefers-color-scheme: dark) {
+      .tabbar { background: rgba(0,0,0,.9); border-top-color:#262626; }
+    }
+    .grid { display:grid; gap:12px; }
+    .row { display:flex; align-items:center; gap:12px; }
+    .card { background: var(--card); border:1px solid #e5e7eb; border-radius: 16px; padding: 12px; }
+    @media (prefers-color-scheme: dark) {
+      .card { border-color:#262626; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React + Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    const LS_KEYS = {
+      recurrings: "spese_recurrings_v1",
+      budgets: "spese_budgets_v1",
+      theme: "spese_theme_v1",
+    };
+
+    const FREQ = {
+      MONTHLY: { key: "monthly", label: "Mensile" },
+      YEARLY: { key: "yearly", label: "Annuale" },
+      EVERY_X_MONTHS: (x) => ({ key: \`every_\${x}_months\`, x, label: \`Ogni \${x} mesi\` }),
+      BIENNIAL: { key: "biennial", label: "Biennale" },
+    };
+
+    const uuid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+    const toISODate = (d) => new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString();
+    const startOfMonth = (date) => new Date(date.getFullYear(), date.getMonth(), 1);
+    const endOfMonthDate = (date) => new Date(date.getFullYear(), date.getMonth()+1, 0);
+    const startOfWeek = (d) => { const n = new Date(d); const day = (n.getDay()+6)%7; n.setDate(n.getDate()-day); n.setHours(0,0,0,0); return n; };
+    const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate()+n); return x; };
+
+    const itMonthYear = new Intl.DateTimeFormat("it-IT", { month: "long", year: "numeric" });
+    const itDayLong = new Intl.DateTimeFormat("it-IT", { weekday: "long", day: "numeric", month: "long"});
+    const cur = new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" });
+
+    function saveLS(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+    function readLS(key, fallback) { try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; }}
+
+    function clampDay(day, date){
+      const last = endOfMonthDate(date).getDate();
+      return Math.max(1, Math.min(day ?? 1, last));
+    }
+
+    function generateMonthPlan(date, recurrings, budgets){
+      const month = date.getMonth()+1;
+      const year = date.getFullYear();
+      const items = [];
+
+      recurrings.forEach(r => {
+        if (r.excludedMonths?.includes(month)) return;
+        const amount = (r.amountOverrides && r.amountOverrides[month]) ?? r.baseAmount;
+
+        if (r.frequency === FREQ.MONTHLY.key){
+          const day = clampDay(r.dayOfMonth, date);
+          const dt = new Date(year, month-1, day);
+          items.push({ id: uuid(), dateISO: toISODate(dt), title: r.name, amount, type: 'recurring', recurringId: r.id });
+        } else if (r.frequency === FREQ.YEARLY.key){
+          if ((r.monthOfYear||1) === month){
+            const day = clampDay(r.dayOfMonth, date);
+            const dt = new Date(year, month-1, day);
+            items.push({ id: uuid(), dateISO: toISODate(dt), title: r.name, amount, type: 'recurring', recurringId: r.id });
+          }
+        } else if (r.frequency.startsWith("every_") && r.frequency.endsWith("_months")){
+          const x = parseInt(r.frequency.split("_")[1] || "1", 10);
+          if ((month % x) === 0){
+            const day = clampDay(r.dayOfMonth, date);
+            const dt = new Date(year, month-1, day);
+            items.push({ id: uuid(), dateISO: toISODate(dt), title: r.name, amount, type: 'recurring', recurringId: r.id });
+          }
+        } else if (r.frequency === FREQ.BIENNIAL.key){
+          if ((r.monthOfYear||1) === month && year % 2 === 0){
+            const day = clampDay(r.dayOfMonth, date);
+            const dt = new Date(year, month-1, day);
+            items.push({ id: uuid(), dateISO: toISODate(dt), title: r.name, amount, type: 'recurring', recurringId: r.id });
+          }
+        }
+      });
+
+      const endDate = endOfMonthDate(date);
+      budgets.forEach(b => {
+        items.push({ id: uuid(), dateISO: toISODate(endDate), title: \`Budget \${b.category}\` , amount: b.cap, type: 'budget', recurringId: null });
+      });
+
+      items.sort((a,b)=> new Date(a.dateISO) - new Date(b.dateISO));
+      return items;
+    }
+
+    const seedRecurrings = () => ([
+      { id: uuid(), name: "Spotify", baseAmount: 7.00, category: "Abbonamenti", frequency: FREQ.MONTHLY.key, dayOfMonth: 3, monthOfYear: null, amountOverrides: {}, excludedMonths: [] },
+      { id: uuid(), name: "Iliad", baseAmount: 7.99, category: "Telefonia", frequency: FREQ.MONTHLY.key, dayOfMonth: 22, monthOfYear: null, amountOverrides: {}, excludedMonths: [] },
+      { id: uuid(), name: "Compassion", baseAmount: 29.00, category: "Donazioni", frequency: FREQ.MONTHLY.key, dayOfMonth: 7, monthOfYear: null, amountOverrides: { 11:50, 12:50 }, excludedMonths: [] },
+      { id: uuid(), name: "Assicurazione Auto", baseAmount: 380.00, category: "Auto", frequency: FREQ.YEARLY.key, dayOfMonth: 23, monthOfYear: 8, amountOverrides: {}, excludedMonths: [] },
+      { id: uuid(), name: "Revisione Auto", baseAmount: 100.00, category: "Auto", frequency: FREQ.BIENNIAL.key, dayOfMonth: 4, monthOfYear: 5, amountOverrides: {}, excludedMonths: [] },
+    ]);
+    const seedBudgets = () => ([
+      { id: uuid(), category: "Luce", cap: 70 },
+      { id: uuid(), category: "Gas", cap: 60 },
+      { id: uuid(), category: "Carburante", cap: 80 },
+    ]);
+
+    function useSystemTheme(){
+      const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const saved = readLS(LS_KEYS.theme, null);
+      const [theme, setTheme] = useState(saved || (prefersDark ? 'dark' : 'light'));
+      useEffect(()=>{ localStorage.setItem(LS_KEYS.theme, JSON.stringify(theme)); document.documentElement.dataset.theme = theme; }, [theme]);
+      return [theme, setTheme];
+    }
+
+    function TopBar({ title, onPrev, onNext, children }){
+      return (
+        <div className="row" style={{justifyContent:'space-between', marginBottom: 16}}>
+          <div className="row">
+            <button className="btn" onClick={onPrev}>&lsaquo;</button>
+            <button className="btn" onClick={onNext}>&rsaquo;</button>
+          </div>
+          <h1 style={{fontSize:18, fontWeight:700, textTransform:'capitalize'}}>{title}</h1>
+          <div className="row">{children}</div>
+        </div>
+      );
+    }
+
+    function StatCard({ label, value }){
+      return (
+        <div className="card" style={{flex:1}}>
+          <div style={{color:'var(--muted)', fontSize:13}}>{label}</div>
+          <div style={{fontSize:22, fontWeight:800, marginTop:6}}>{value}</div>
+        </div>
+      )
+    }
+
+    function Section({ title, children }){
+      return (
+        <div style={{marginTop:24}}>
+          <div style={{color:'var(--muted)', fontSize:13, marginBottom:8}}>{title}</div>
+          <div className="card">{children}</div>
+        </div>
+      );
+    }
+
+    function ListRow({ left, right, onClick }){
+      return (
+        <button onClick={onClick} style={{display:'block', width:'100%', textAlign:'left', padding:'12px 16px', background:'var(--card)', border:'0', borderBottom:'1px solid #e5e7eb'}}>
+          <div className="row" style={{justifyContent:'space-between'}}>
+            <div style={{flex:1}}>{left}</div>
+            <div style={{fontWeight:700}}>{right}</div>
+          </div>
+        </button>
+      );
+    }
+
+    function TabBar({ tab, setTab }){
+      const tabs = [
+        { key: 'home', label: 'Home', icon: '🏠' },
+        { key: 'calendar', label: 'Calendario', icon: '📅' },
+        { key: 'spese', label: 'Spese', icon: '💳' },
+        { key: 'settings', label: 'Impostazioni', icon: '⚙️' },
+      ];
+      return (
+        <div className="tabbar">
+          <div style="display:grid; grid-template-columns: repeat(4, 1fr);">
+            {tabs.map(t => (
+              <button key={t.key} onclick={()=>setTab(t.key)} style="padding:8px 6px; display:flex; flex-direction:column; align-items:center; width:100%; background:transparent; border:0; font-size:12px;">
+                <div style="font-size:18px;">{t.icon}</div>
+                <div style={tab===t.key? {color:'#0A84FF', fontWeight:600} : {opacity:.8}}>{t.label}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function Modal({ open, onClose, title, children }){
+      if(!open) return null;
+      return (
+        <div style="position:fixed; inset:0; display:grid; place-items:center; padding:16px; z-index:50;">
+          <div style="position:absolute; inset:0; background:rgba(0,0,0,.5)" onclick={onClose}></div>
+          <div style="position:relative; width:100%; max-width:640px; border-radius:16px; background:var(--card); padding:16px;">
+            <div style="font-size:16px; font-weight:700; margin-bottom:12px;">{title}</div>
+            <div style="max-height:60vh; overflow:auto; padding-right:4px">{children}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function SwipeRow({ children, onDelete }){
+      const ref = useRef(null);
+      const startX = useRef(0);
+      const dx = useRef(0);
+      function onTouchStart(e){ startX.current = e.touches[0].clientX; }
+      function onTouchMove(e){
+        dx.current = Math.min(0, e.touches[0].clientX - startX.current);
+        if(ref.current) ref.current.style.transform = \`translateX(\${dx.current}px)\`;
+      }
+      function onTouchEnd(){
+        const threshold = -60;
+        if(dx.current < threshold){ if(ref.current) ref.current.style.transform = \`translateX(-80px)\`; }
+        else { if(ref.current) ref.current.style.transform = \`translateX(0)\`; }
+      }
+      return (
+        <div style="position:relative; overflow:hidden;">
+          <div style="position:absolute; right:0; top:0; bottom:0; width:80px; background:#FF3B30; color:#fff; display:grid; place-items:center; font-size:13px;">
+            <button onclick={onDelete} style="background:transparent; border:0; color:#fff;">Elimina</button>
+          </div>
+          <div ref={ref} className="swipe-row" ontouchstart={onTouchStart} ontouchmove={onTouchMove} ontouchend={onTouchEnd}>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    function RecurringForm({ initial, onSave, onCancel }){
+      const [name, setName] = useState(initial?.name || "");
+      const [amount, setAmount] = useState(String(initial?.baseAmount ?? ""));
+      const [category, setCategory] = useState(initial?.category || "Abbonamenti");
+      const [frequency, setFrequency] = useState(initial?.frequency || FREQ.MONTHLY.key);
+      const [day, setDay] = useState(initial?.dayOfMonth || 1);
+      const [monthOfYear, setMonthOfYear] = useState(initial?.monthOfYear || 1);
+      const canSave = name.trim() && !isNaN(parseFloat(amount));
+
+      return (
+        <div className="grid" style={{gap:12}}>
+          <label className="grid" style={{gap:4}}>
+            <span style={{fontSize:12, color:'var(--muted)'}}>Nome</span>
+            <input className="input" value={name} onChange={e=>setName(e.target.value)} placeholder="Spotify" />
+          </label>
+          <label className="grid" style={{gap:4}}>
+            <span style={{fontSize:12, color:'var(--muted)'}}>Importo</span>
+            <input className="input" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="7.00" />
+          </label>
+          <label className="grid" style={{gap:4}}>
+            <span style={{fontSize:12, color:'var(--muted)'}}>Categoria</span>
+            <input className="input" value={category} onChange={e=>setCategory(e.target.value)} />
+          </label>
+          <label className="grid" style={{gap:4}}>
+            <span style={{fontSize:12, color:'var(--muted)'}}>Frequenza</span>
+            <select className="input" value={frequency} onChange={e=>setFrequency(e.target.value)}>
+              <option value={FREQ.MONTHLY.key}>Mensile</option>
+              <option value={FREQ.YEARLY.key}>Annuale</option>
+              <option value={FREQ.EVERY_X_MONTHS(2).key}>Ogni 2 mesi</option>
+              <option value={FREQ.EVERY_X_MONTHS(3).key}>Ogni 3 mesi</option>
+              <option value={FREQ.BIENNIAL.key}>Biennale</option>
+            </select>
+          </label>
+          <div className="row">
+            <label className="grid" style={{gap:4, flex:1}}>
+              <span style={{fontSize:12, color:'var(--muted)'}}>Giorno</span>
+              <input className="input" type="number" value={day} onChange={e=>setDay(parseInt(e.target.value||"1",10))} />
+            </label>
+            <label className="grid" style={{gap:4, flex:1}}>
+              <span style={{fontSize:12, color:'var(--muted)'}}>Mese (solo annuale/biennale)</span>
+              <input className="input" type="number" value={monthOfYear} onChange={e=>setMonthOfYear(parseInt(e.target.value||"1",10))} />
+            </label>
+          </div>
+          <div className="row" style={{justifyContent:'flex-end'}}>
+            <button className="btn ghost" onClick={onCancel}>Annulla</button>
+            <button className="btn primary" disabled={!canSave} onClick={()=>{
+              const payload = { id: initial?.id || uuid(), name, baseAmount: parseFloat(amount), category, frequency, dayOfMonth: day, monthOfYear, amountOverrides: initial?.amountOverrides || {}, excludedMonths: initial?.excludedMonths || [] };
+              onSave(payload);
+            }}>Salva</button>
+          </div>
+        </div>
+      );
+    }
+
+    function BudgetForm({ initial, onSave, onCancel }){
+      const [category, setCategory] = useState(initial?.category || "");
+      const [cap, setCap] = useState(String(initial?.cap ?? ""));
+      const canSave = category.trim() && !isNaN(parseFloat(cap));
+      return (
+        <div className="grid" style={{gap:12}}>
+          <label className="grid" style={{gap:4}}>
+            <span style={{fontSize:12, color:'var(--muted)'}}>Categoria</span>
+            <input className="input" value={category} onChange={e=>setCategory(e.target.value)} placeholder="Luce" />
+          </label>
+          <label className="grid" style={{gap:4}}>
+            <span style={{fontSize:12, color:'var(--muted)'}}>Tetto mensile</span>
+            <input className="input" value={cap} onChange={e=>setCap(e.target.value)} placeholder="70" />
+          </label>
+          <div className="row" style={{justifyContent:'flex-end'}}>
+            <button className="btn ghost" onClick={onCancel}>Annulla</button>
+            <button className="btn primary" disabled={!canSave} onClick={()=> onSave({ id: initial?.id || uuid(), category, cap: parseFloat(cap) })}>Salva</button>
+          </div>
+        </div>
+      );
+    }
+
+    function TotalBudget({ budgets }){
+      const total = budgets.reduce((s,b)=> s+b.cap, 0);
+      return <div>{cur.format(total)}</div>;
+    }
+
+    function SpeseView({ recurrings, setRecurrings, budgets, setBudgets }){
+      const [openRecForm, setOpenRecForm] = useState(false);
+      const [openBudForm, setOpenBudForm] = useState(false);
+      const [editRec, setEditRec] = useState(null);
+      const [editBud, setEditBud] = useState(null);
+
+      const addOrUpdateRecurring = (r) => {
+        setRecurrings(prev=>{
+          const exists = prev.some(x=>x.id===r.id);
+          const arr = exists ? prev.map(x=> x.id===r.id? r:x) : [...prev, r];
+          saveLS(LS_KEYS.recurrings, arr); return arr;
+        });
+        setOpenRecForm(false); setEditRec(null);
+      };
+      const deleteRecurring = (id) => { setRecurrings(prev=>{ const arr=prev.filter(x=>x.id!==id); saveLS(LS_KEYS.recurrings, arr); return arr; }); };
+
+      const addOrUpdateBudget = (b) => {
+        setBudgets(prev=>{
+          const exists = prev.some(x=>x.id===b.id);
+          const arr = exists ? prev.map(x=> x.id===b.id? b:x) : [...prev, b];
+          saveLS(LS_KEYS.budgets, arr); return arr;
+        });
+        setOpenBudForm(false); setEditBud(null);
+      };
+      const deleteBudget = (id) => { setBudgets(prev=>{ const arr=prev.filter(x=>x.id!==id); saveLS(LS_KEYS.budgets, arr); return arr; }); };
+
+      return (
+        <div className="grid" style={{gap:32}}>
+          <div>
+            <div className="row" style={{justifyContent:'space-between', marginBottom:8}}>
+              <div style={{fontSize:18, fontWeight:700}}>Ricorrenti</div>
+              <button className="btn primary" onClick={()=>{ setEditRec(null); setOpenRecForm(true); }}>+ Aggiungi</button>
+            </div>
+            <div className="card">
+              {recurrings.length===0 && <div style={{color:'var(--muted)'}}>Nessun ricorrente</div>}
+              {recurrings.map(r => (
+                <SwipeRow key={r.id} onDelete={()=>deleteRecurring(r.id)}>
+                  <button onClick={()=>{ setEditRec(r); setOpenRecForm(true); }} style="display:block; width:100%; text-align:left; padding:12px 16px; background:transparent; border:0; border-bottom:1px solid #e5e7eb;">
+                    <div className="row" style={{justifyContent:'space-between'}}>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:600}}>{r.name}</div>
+                        <div style={{fontSize:12, color:'var(--muted)'}}>{r.frequency==='monthly'?'Mensile': r.frequency==='yearly'? 'Annuale': r.frequency==='biennial'? 'Biennale': r.frequency.replaceAll('_',' ')} · Giorno {r.dayOfMonth||1}{r.monthOfYear?\` · Mese \${r.monthOfYear}\`:''}</div>
+                      </div>
+                      <div style={{fontWeight:700}}>{cur.format(r.baseAmount)}</div>
+                    </div>
+                  </button>
+                </SwipeRow>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="row" style={{justifyContent:'space-between', marginBottom:8}}>
+              <div style={{fontSize:18, fontWeight:700}}>Previsionale</div>
+              <button className="btn primary" onClick={()=>{ setEditBud(null); setOpenBudForm(true); }}>+ Budget</button>
+            </div>
+            <div className="card">
+              {budgets.length===0 && <div style={{color:'var(--muted)'}}>Nessuna categoria</div>}
+              {budgets.map(b => (
+                <SwipeRow key={b.id} onDelete={()=>deleteBudget(b.id)}>
+                  <button onClick={()=>{ setEditBud(b); setOpenBudForm(true); }} style="display:block; width:100%; text-align:left; padding:12px 16px; background:transparent; border:0; border-bottom:1px solid #e5e7eb;">
+                    <div className="row" style={{justifyContent:'space-between'}}>
+                      <div style={{flex:1}}>{b.category}</div>
+                      <div style={{fontWeight:700}}>{cur.format(b.cap)}</div>
+                    </div>
+                  </button>
+                </SwipeRow>
+              ))}
+              {budgets.length>0 && (
+                <div style="display:flex; align-items:center; justify-content:space-between; padding:12px 16px; background:#f6f6f7; border-radius:12px; margin-top:8px;">
+                  <div style="font-weight:600;">Totale previsionale mese</div>
+                  <div style="font-weight:700;">{cur.format(budgets.reduce((s,b)=> s+b.cap, 0))}</div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <Modal open={openRecForm} onClose={()=>{ setOpenRecForm(false); setEditRec(null); }} title={editRec? 'Modifica ricorrente':'Nuovo ricorrente'}>
+            <RecurringForm initial={editRec} onSave={addOrUpdateRecurring} onCancel={()=>{ setOpenRecForm(false); setEditRec(null); }} />
+          </Modal>
+          <Modal open={openBudForm} onClose={()=>{ setOpenBudForm(false); setEditBud(null); }} title={editBud? 'Modifica budget':'Nuovo budget'}>
+            <BudgetForm initial={editBud} onSave={addOrUpdateBudget} onCancel={()=>{ setOpenBudForm(false); setEditBud(null); }} />
+          </Modal>
+        </div>
+      );
+    }
+
+    function MonthGrid({ refDate, items }){
+      const shortWd = new Intl.DateTimeFormat('it-IT', { weekday:'short' });
+      const firstOfMonth = startOfMonth(refDate);
+      const start = startOfWeek(firstOfMonth);
+      const days = Array.from({length: 42}, (_,i)=> addDays(start, i));
+
+      const byDate = useMemo(()=>{
+        const map = new Map();
+        items.forEach(it=>{ const k = new Date(it.dateISO).toDateString(); if(!map.has(k)) map.set(k, []); map.get(k).push(it); });
+        return map;
+      }, [items]);
+
+      return (
+        <div>
+          <div style="display:grid; grid-template-columns:repeat(7,1fr); font-size:12px; color:var(--muted); margin-bottom:4px;">
+            {[...Array(7)].map((_,i)=> <div key={i} style="padding:6px 8px;">{shortWd.format(addDays(start, i))}</div>)}
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(7,1fr); gap:1px; background:#e5e7eb; border-radius:8px; overflow:hidden;">
+            {days.map((d,i)=>{
+              const inMonth = d.getMonth()===refDate.getMonth();
+              const k = d.toDateString();
+              const list = byDate.get(k) || [];
+              const total = list.reduce((s,x)=> s+x.amount, 0);
+              return (
+                <div key={i} style={\`min-height:84px; background:var(--card); padding:6px; \${inMonth? '':'opacity:.5'}\`}>
+                  <div style="font-size:10px; margin-bottom:4px;">{d.getDate()}</div>
+                  {list.slice(0,3).map(it=> (
+                    <div key={it.id} style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:11px;">• {it.title}</div>
+                  ))}
+                  {list.length>3 && <div style="font-size:11px; color:var(--muted)">+{list.length-3} altro</div>}
+                  {total>0 && <div style="font-size:11px; font-weight:700; margin-top:4px;">{cur.format(total)}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    function Home({ refDate, setRefDate, planned }){
+      const totalPlanned = planned.reduce((s, p)=> s+p.amount, 0);
+      const totalRecurrings = planned.filter(p=>p.type==='recurring').reduce((s,p)=> s+p.amount, 0);
+      const now = new Date();
+      const in7 = new Date(now.getTime()+7*86400000);
+      const soon = planned.filter(p => new Date(p.dateISO) >= now && new Date(p.dateISO) <= in7);
+
+      const [filterOpen, setFilterOpen] = useState(false);
+      const [mode, setMode] = useState('standard'); // standard | timeline
+
+      const timeline = useMemo(()=>{
+        const byMonth = planned.reduce((acc, p)=>{ const d=new Date(p.dateISO); const key=\`\${d.getFullYear()}-\${d.getMonth()+1}\`; (acc[key]=acc[key]||[]).push(p); return acc; }, {});
+        const arr = Object.entries(byMonth).map(([k, items])=>({ key:k, year: +k.split('-')[0], month:+k.split('-')[1], total: items.reduce((s,x)=>s+x.amount,0), items}));
+        arr.sort((a,b)=> a.year===b.year? a.month-b.month : a.year-b.year);
+        return arr;
+      }, [planned]);
+
+      return (
+        <div>
+          <TopBar title={itMonthYear.format(refDate)} onPrev={()=>setRefDate(new Date(refDate.getFullYear(), refDate.getMonth()-1, 1))} onNext={()=>setRefDate(new Date(refDate.getFullYear(), refDate.getMonth()+1, 1))}>
+            <button className="btn" onClick={()=>setFilterOpen(true)}>Filtro</button>
+          </TopBar>
+
+          <div className="row">
+            <StatCard label="Totale previsto mese" value={cur.format(totalPlanned)} />
+            <StatCard label="Ricorrenti del mese" value={cur.format(totalRecurrings)} />
+          </div>
+
+          {mode==='standard' && (
+            <Section title="Da pagare entro 7 giorni">
+              <div>
+                {soon.length===0 && (
+                  <div style={{color:'var(--muted)'}}>Niente in scadenza</div>
+                )}
+                {soon.map(item => (
+                  <ListRow key={item.id}
+                    left={<div>
+                      <div style={{fontWeight:500}}>{item.title}</div>
+                      <div style={{fontSize:12, color:'var(--muted)'}}>{new Date(item.dateISO).toLocaleDateString("it-IT")}</div>
+                    </div>}
+                    right={cur.format(item.amount)}
+                  />
+                ))}
+              </div>
+            </Section>
+          )}
+
+          {mode==='timeline' && (
+            <Section title="Elenco temporale (per mese)">
+              <div>
+                {timeline.map(m => (
+                  <div key={m.key} className="card" style={{marginBottom:8}}>
+                    <div className="row" style={{justifyContent:'space-between'}}>
+                      <div className="capitalize" style={{fontWeight:600}}>{new Date(m.year, m.month-1, 1).toLocaleDateString('it-IT', { month:'long', year:'numeric'})}</div>
+                      <div style={{fontWeight:700}}>{cur.format(m.total)}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
+
+          <Modal open={filterOpen} onClose={()=>setFilterOpen(false)} title="Filtro">
+            <div className="grid" style={{gap:8}}>
+              <label className="row" style={{gap:8}}><input type="radio" name="mode" checked={mode==='standard'} onChange={()=>setMode('standard')} /> Elenco standard</label>
+              <label className="row" style={{gap:8}}><input type="radio" name="mode" checked={mode==='timeline'} onChange={()=>setMode('timeline')} /> Elenco temporale (giorni/mesi/anni)</label>
+            </div>
+          </Modal>
+        </div>
+      );
+    }
+
+    function CalendarView({ refDate, setRefDate, planned }){
+      return (
+        <div>
+          <TopBar title={itMonthYear.format(refDate)} onPrev={()=>setRefDate(new Date(refDate.getFullYear(), refDate.getMonth()-1, 1))} onNext={()=>setRefDate(new Date(refDate.getFullYear(), refDate.getMonth()+1, 1))} />
+          <MonthGrid refDate={refDate} items={planned} />
+        </div>
+      );
+    }
+
+    function Settings({ theme, setTheme, onReset, onSeed }){
+      return (
+        <div className="grid" style={{gap:16}}>
+          <div style={{fontSize:18, fontWeight:700}}>Impostazioni</div>
+          <div className="card">
+            <div className="row" style={{justifyContent:'space-between', borderBottom:'1px solid #e5e7eb', paddingBottom:12, marginBottom:12}}>
+              <div>Tema</div>
+              <select className="input" style={{width:140}} value={theme} onChange={e=>setTheme(e.target.value)}>
+                <option value="light">Chiaro</option>
+                <option value="dark">Scuro</option>
+              </select>
+            </div>
+            <div className="row" style={{justifyContent:'space-between', borderBottom:'1px solid #e5e7eb', paddingBottom:12, marginBottom:12}}>
+              <div>Ripristina dati di esempio</div>
+              <button className="btn" onClick={onSeed}>Seed</button>
+            </div>
+            <div className="row" style={{justifyContent:'space-between'}}>
+              <div>Svuota tutti i dati</div>
+              <button className="btn danger" onClick={onReset}>Svuota</button>
+            </div>
+          </div>
+
+          <div className="card">
+            <div style={{fontWeight:600, marginBottom:8}}>Aggiungere sul telefono (iPhone)</div>
+            <ol style="padding-left:18px;">
+              <li>Pubblica questi 3 file su un indirizzo HTTPS (es. GitHub Pages / Netlify).</li>
+              <li>Apri l’URL in Safari su iPhone.</li>
+              <li>Tocca <b>Condividi</b> → <b>Aggiungi a Home</b>.</li>
+            </ol>
+            <div style="font-size:12px; color:var(--muted)">Nota: per funzionare come PWA (offline + icona), deve essere online con HTTPS e contenere i file manifest + service worker inclusi in questo pacchetto.</div>
+          </div>
+        </div>
+      );
+    }
+
+    function App(){
+      const [theme, setTheme] = useSystemTheme();
+      const [tab, setTab] = useState('home');
+      const [refDate, setRefDate] = useState(new Date());
+      const [recurrings, setRecurrings] = useState(()=> readLS(LS_KEYS.recurrings, seedRecurrings()));
+      const [budgets, setBudgets] = useState(()=> readLS(LS_KEYS.budgets, seedBudgets()));
+
+      useEffect(()=> saveLS(LS_KEYS.recurrings, recurrings), [recurrings]);
+      useEffect(()=> saveLS(LS_KEYS.budgets, budgets), [budgets]);
+
+      const planned = useMemo(()=> generateMonthPlan(refDate, recurrings, budgets), [refDate, recurrings, budgets]);
+
+      useEffect(()=> { document.body.classList.add('bg'); }, []);
+
+      return (
+        <div className="container">
+          {tab==='home' && <Home refDate={refDate} setRefDate={setRefDate} planned={planned} />}
+          {tab==='calendar' && <CalendarView refDate={refDate} setRefDate={setRefDate} planned={planned} />}
+          {tab==='spese' && <SpeseView recurrings={recurrings} setRecurrings={setRecurrings} budgets={budgets} setBudgets={setBudgets} />}
+          {tab==='settings' && <Settings theme={theme} setTheme={setTheme} onReset={()=>{ setRecurrings([]); setBudgets([]); }} onSeed={()=>{ setRecurrings(seedRecurrings()); setBudgets(seedBudgets()); }} />}
+
+          <div className="tabbar">
+            <div style="display:grid; grid-template-columns: repeat(4, 1fr); max-width:960px; margin:0 auto;">
+              {[
+                { key: 'home', label: 'Home', icon:'🏠' },
+                { key: 'calendar', label: 'Calendario', icon:'📅' },
+                { key: 'spese', label: 'Spese', icon:'💳' },
+                { key: 'settings', label: 'Impostazioni', icon:'⚙️' },
+              ].map(t => (
+                <button key={t.key} onclick={()=>setTab(t.key)} style="padding:8px 6px; display:flex; flex-direction:column; align-items:center; width:100%; background:transparent; border:0; font-size:12px;">
+                  <div style="font-size:18px;">{t.icon}</div>
+                  <div style={tab===t.key? {color:'#0A84FF', fontWeight:600} : {opacity:.8}}>{t.label}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+    // PWA registration
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(()=>{});
+      });
+    }
+  </script>
+</body>
+</html>
